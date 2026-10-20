@@ -5,7 +5,7 @@ url = "https://api.ojp.gov/bjsdataset/v1/gcuy-rt5g.json"
 
 response = requests.get(
     url,
-    params={"$limit": 10}, # there are 68852 total records
+    params={"$limit": 100000}, # there are 68852 total records
     timeout=30
 )
 
