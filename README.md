@@ -17,3 +17,19 @@ to `ncvs`. Set `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, or
 `POSTGRES_PORT` in the environment (or a local `.env` file) to change them.
 Database initialization settings apply when the volume is first created.
 
+## Load the data
+
+Run the full extraction, transformation, and database load with:
+
+```sh
+docker compose run --rm --build app python load.py
+```
+
+The first load creates the three tables. Later runs upsert records using their
+primary keys; the entire database load is committed together. Each run fetches
+the full dataset. To inspect the table counts:
+
+```sh
+docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT (SELECT count(*) FROM respondents) AS respondents, (SELECT count(*) FROM offense_types) AS offense_types, (SELECT count(*) FROM victimizations) AS victimizations;"'
+```
+
