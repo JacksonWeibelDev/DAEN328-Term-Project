@@ -4,11 +4,11 @@
 
 ## Docker setup
 
-Install Docker and the Docker Compose plugin, then start PostgreSQL:
+Install Docker and the Docker Compose plugin, then start the application and
+PostgreSQL:
 
 ```sh
-docker compose up -d db
-docker compose run --rm app
+docker compose up --build
 ```
 
 The database is available on localhost port 5432 and its data persists in a
@@ -17,16 +17,13 @@ to `ncvs`. Set `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, or
 `POSTGRES_PORT` in the environment (or a local `.env` file) to change them.
 Database initialization settings apply when the volume is first created.
 
-## Load the data
+Open <http://localhost:8501> to view the application. The first browser session
+after the app starts runs the full extraction, transformation, and load. The
+page shows the load status; reload it to retry if loading fails. Subsequent page
+reruns and sessions reuse the successful result until the app restarts.
 
-Run the full extraction, transformation, and database load with:
-
-```sh
-docker compose run --rm --build app python load.py
-```
-
-The first load creates the three tables. Later runs upsert records using their
-primary keys; the entire database load is committed together. Each run fetches
+The first load creates the three tables. Later loads upsert records using their
+primary keys; the entire database load is committed together. Each load fetches
 the full dataset. To inspect the table counts:
 
 ```sh

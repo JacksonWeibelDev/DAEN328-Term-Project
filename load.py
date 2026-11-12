@@ -1,10 +1,6 @@
-"""Extract, transform, and upsert NCVS data into PostgreSQL."""
+"""Upsert transformed NCVS data into PostgreSQL."""
 import pandas as pd
-import psycopg
 from psycopg import sql
-
-from extract import extract_data
-from transform import format_summary, transform
 
 
 SCHEMA = """
@@ -71,18 +67,3 @@ def load_tables(connection, tables):
                 rows = (tuple(sql_value(value) for value in row)
                         for row in frame.itertuples(index=False, name=None))
                 cursor.executemany(query, rows)
-
-
-def main():
-    tables, stats = transform(extract_data())
-    for line in format_summary(stats):
-        print(line)
-    # libpq reads PGHOST, PGPORT, PGDATABASE, PGUSER and PGPASSWORD.
-    with psycopg.connect() as connection:
-        load_tables(connection, tables)
-    for name in KEYS:
-        print(f"{name}: {len(tables[name]):,} rows loaded")
-
-
-if __name__ == "__main__":
-    main()
