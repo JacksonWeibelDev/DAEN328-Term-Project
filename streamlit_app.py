@@ -1,6 +1,10 @@
 """Streamlit entry point and NCVS data pipeline."""
-import psycopg
+import os
+from contextlib import closing
+
+import psycopg2
 import streamlit as st
+from dotenv import load_dotenv
 
 from extract import extract_data
 from load import load_tables
@@ -11,7 +15,14 @@ from transform import format_summary, transform
 def run_pipeline():
     """Run the full pipeline once per app process after a successful load."""
     tables, stats = transform(extract_data())
-    with psycopg.connect() as connection:
+    load_dotenv()
+    with closing(psycopg2.connect(
+        host=os.environ.get("PGHOST", "localhost"),
+        port=os.environ.get("PGPORT", "5432"),
+        dbname=os.environ["POSTGRES_DB"],
+        user=os.environ["POSTGRES_USER"],
+        password=os.environ["POSTGRES_PASSWORD"],
+    )) as connection:
         load_tables(connection, tables)
     return format_summary(stats)
 

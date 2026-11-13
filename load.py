@@ -1,6 +1,6 @@
 """Upsert transformed NCVS data into PostgreSQL."""
 import pandas as pd
-from psycopg import sql
+from psycopg2 import sql
 
 
 SCHEMA = """
@@ -46,7 +46,7 @@ def sql_value(value):
 
 def load_tables(connection, tables):
     """Create tables and upsert all transformed rows as one transaction."""
-    with connection.transaction():
+    with connection:
         with connection.cursor() as cursor:
             cursor.execute(SCHEMA)
             for name, keys in KEYS.items():
