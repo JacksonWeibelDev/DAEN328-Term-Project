@@ -1,6 +1,8 @@
 """Upsert transformed NCVS data into PostgreSQL."""
 import pandas as pd
 from psycopg2 import sql
+from psycopg2.extras import execute_values
+from itertools import islice
 
 
 SCHEMA = """
@@ -26,6 +28,10 @@ CREATE TABLE IF NOT EXISTS victimizations (
     FOREIGN KEY (idper, yearq) REFERENCES respondents (idper, yearq),
     FOREIGN KEY (newoff) REFERENCES offense_types (newoff)
 );
+CREATE TABLE IF NOT EXISTS etl_checkpoint (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    updated_at TIMESTAMPTZ NOT NULL
+);
 """
 
 KEYS = {
@@ -44,8 +50,21 @@ def sql_value(value):
     return value.item() if hasattr(value, "item") else value
 
 
-def load_tables(connection, tables):
-    """Create tables and upsert all transformed rows as one transaction."""
+def get_checkpoint(connection):
+    """Return the last successfully loaded source timestamp, if one exists."""
+    with connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT to_regclass('etl_checkpoint')")
+            if cursor.fetchone()[0] is None:
+                return None
+            cursor.execute("SELECT updated_at FROM etl_checkpoint WHERE singleton = TRUE")
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+
+def load_tables(connection, tables, checkpoint=None):
+    """Atomically upsert the tables and checkpoint; return inserted/updated counts."""
+    counts = {}
     with connection:
         with connection.cursor() as cursor:
             cursor.execute(SCHEMA)
@@ -53,11 +72,11 @@ def load_tables(connection, tables):
                 frame = tables[name]
                 columns = list(frame.columns)
                 updates = [c for c in columns if c not in keys]
-                query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) "
-                                "ON CONFLICT ({}) DO UPDATE SET {}").format(
+                query = sql.SQL("INSERT INTO {} ({}) VALUES %s "
+                                "ON CONFLICT ({}) DO UPDATE SET {} "
+                                "RETURNING (xmax = 0)").format(
                     sql.Identifier(name),
                     sql.SQL(", ").join(map(sql.Identifier, columns)),
-                    sql.SQL(", ").join(sql.Placeholder() for _ in columns),
                     sql.SQL(", ").join(map(sql.Identifier, keys)),
                     sql.SQL(", ").join(
                         sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
@@ -66,4 +85,17 @@ def load_tables(connection, tables):
                 )
                 rows = (tuple(sql_value(value) for value in row)
                         for row in frame.itertuples(index=False, name=None))
-                cursor.executemany(query, rows)
+                inserted = updated = 0
+                while batch := list(islice(rows, 1000)):
+                    results = execute_values(cursor, query.as_string(connection), batch,
+                                             page_size=1000, fetch=True)
+                    inserted += sum(row[0] for row in results)
+                    updated += len(results) - sum(row[0] for row in results)
+                counts[name] = {"inserted": inserted, "updated": updated}
+            if checkpoint is not None:
+                cursor.execute(
+                    "INSERT INTO etl_checkpoint (singleton, updated_at) VALUES (TRUE, %s) "
+                    "ON CONFLICT (singleton) DO UPDATE SET updated_at = EXCLUDED.updated_at",
+                    (checkpoint,),
+                )
+    return counts

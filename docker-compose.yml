@@ -20,6 +20,8 @@ services:
     build: .
     image: ncvs-app
     env_file: .env
+    environment:
+      PYTHONUNBUFFERED: "1"
     command: ["python", "streamlit_app.py", "--etl"]
     depends_on:
       db:

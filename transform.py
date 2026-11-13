@@ -275,9 +275,11 @@ def format_summary(stats):
         ("filled by inference", "filled"),
         ("sentinel codes set to NULL", "sentinel_to_null"),
     ]:
-        items = {k: v for k, v in stats.get(key, {}).items() if v}
+        items = stats.get(key, {})
         if items:
             lines.append(f"{label}: " + ", ".join(f"{k} {v:,}" for k, v in items.items()))
+        elif not stats["received"] and key == "missing_found":
+            lines.append("missing values: no records to clean")
     for name, n in stats.get("table_rows", {}).items():
         lines.append(f"{name} rows ready to load: {n:,}")
     return lines
