@@ -3,29 +3,32 @@
 ## Docker setup
 
 Install Docker and the Docker Compose plugin. Copy `.env.sample` to `.env` and
-set a PostgreSQL password, then start the application and PostgreSQL:
+set a PostgreSQL password. If you have an existing `.env`, add the settings from
+the sample. Then start the application:
 
 ```sh
 docker compose up --build
 ```
 
-The database is available on the port configured in `.env` and its data
-persists in a Docker volume. Compose passes the `.env` settings to the app,
-which loads them in code. Database initialization settings apply when the
-volume is first created; changing credentials later does not update an existing
-database volume.
+Compose starts PostgreSQL, waits for it to be healthy, and then runs the `etl`
+service once. After ETL succeeds, the Streamlit dashboard starts at
+<http://localhost:8501> (or the `STREAMLIT_PORT` configured in `.env`).
+The database uses a named volume so data persists when containers stop.
+Database initialization settings apply when the volume is first created;
+changing credentials later does not update an existing database volume.
 
-Open <http://localhost:8501> to view the application. The first browser session
-after the app starts runs the full extraction, transformation, and load. The
-page shows the load status; reload it to retry if loading fails. Subsequent page
-reruns and sessions reuse the successful result until the app restarts.
+All services receive their configuration from `.env`. `PGHOST=db` and
+`PGPORT=5432` connect the ETL container to PostgreSQL inside the Compose
+network; `POSTGRES_PORT` controls the port exposed on the host. If ETL fails,
+the dashboard will not start. Inspect `docker compose logs etl` and rerun
+`docker compose up --build` after fixing the error.
 
 The first load creates the three tables. Later loads upsert records using their
 primary keys; the entire database load is committed together. Each load fetches
 the full dataset. To inspect the table counts:
 
 ```sh
-docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT (SELECT count(*) FROM respondents) AS respondents, (SELECT count(*) FROM offense_types) AS offense_types, (SELECT count(*) FROM victimizations) AS victimizations;"'
+docker compose exec db sh -c 'psql -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT (SELECT count(*) FROM respondents) AS respondents, (SELECT count(*) FROM offense_types) AS offense_types, (SELECT count(*) FROM victimizations) AS victimizations;"'
 ```
 
 ## Database schema
