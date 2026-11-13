@@ -1,38 +1,39 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
-import extract
-import load
-import psycopg2
-import transform
+import streamlit_app
 
 
-def test_pipeline_retries_after_failure_and_caches_success(monkeypatch):
+def test_pipeline_calls_etl_functions_and_propagates_errors(monkeypatch):
     extract_data = MagicMock(side_effect=[RuntimeError("API unavailable"), [{"id": "1"}]])
     transform_data = MagicMock(return_value=({"respondents": []}, {"received": 1}))
     load_data = MagicMock()
     connection = MagicMock()
-    monkeypatch.setattr(extract, "extract_data", extract_data)
-    monkeypatch.setattr(transform, "transform", transform_data)
-    monkeypatch.setattr(transform, "format_summary", lambda stats: ["received from API: 1 row"])
-    monkeypatch.setattr(load, "load_tables", load_data)
-    monkeypatch.setattr(psycopg2, "connect", MagicMock(return_value=connection))
+    monkeypatch.setattr(streamlit_app, "extract_data", extract_data)
+    monkeypatch.setattr(streamlit_app, "transform", transform_data)
+    monkeypatch.setattr(streamlit_app, "format_summary", lambda stats: ["received: 1"])
+    monkeypatch.setattr(streamlit_app, "load_tables", load_data)
+    monkeypatch.setattr(streamlit_app.psycopg2, "connect", MagicMock(return_value=connection))
     for name in ("POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD"):
         monkeypatch.setenv(name, "test")
 
-    app = AppTest.from_file(Path(__file__).resolve().parent.parent / "streamlit_app.py").run()
-    assert "API unavailable" in app.error[0].value
-    assert load_data.call_count == 0
+    with pytest.raises(RuntimeError, match="API unavailable"):
+        streamlit_app.run_pipeline()
+    load_data.assert_not_called()
 
-    app.run()
-    assert not app.error
-    assert app.success[0].value == "Data loaded successfully."
-    assert extract_data.call_count == 2
+    assert streamlit_app.run_pipeline() == ["received: 1"]
     transform_data.assert_called_once_with([{"id": "1"}])
     load_data.assert_called_once_with(connection, {"respondents": []})
+    connection.close.assert_called_once()
 
-    app.run()
-    assert extract_data.call_count == 2
-    assert load_data.call_count == 1
+
+def test_dashboard_does_not_run_pipeline(monkeypatch):
+    extract_data = MagicMock(side_effect=AssertionError("dashboard must not run ETL"))
+    monkeypatch.setattr("extract.extract_data", extract_data)
+    app = AppTest.from_file(Path(__file__).resolve().parent.parent / "streamlit_app.py").run()
+    assert not app.exception
+    assert app.title[0].value == "NCVS Victimization Dashboard"
+    extract_data.assert_not_called()

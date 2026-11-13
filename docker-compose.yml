@@ -1,12 +1,13 @@
 services:
   db:
     image: postgres:16
+    env_file: .env
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB in .env}
       POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:?Set POSTGRES_PORT in .env}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -15,17 +16,24 @@ services:
       timeout: 5s
       retries: 12
 
-  app:
+  etl:
     build: .
+    image: ncvs-app
     env_file: .env
-    ports:
-      - "8501:8501"
-    environment:
-      PGHOST: db
-      PGPORT: 5432
+    command: ["python", "streamlit_app.py", "--etl"]
     depends_on:
       db:
         condition: service_healthy
+
+  dashboard:
+    build: .
+    image: ncvs-app
+    env_file: .env
+    ports:
+      - "${STREAMLIT_PORT:?Set STREAMLIT_PORT in .env}:8501"
+    depends_on:
+      etl:
+        condition: service_completed_successfully
 
 volumes:
   postgres_data:

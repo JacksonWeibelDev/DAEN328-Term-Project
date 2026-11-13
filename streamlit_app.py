@@ -1,5 +1,6 @@
 """Streamlit entry point and NCVS data pipeline."""
 import os
+import sys
 from contextlib import closing
 
 import psycopg2
@@ -11,9 +12,8 @@ from load import load_tables
 from transform import format_summary, transform
 
 
-@st.cache_resource(show_spinner=False)
 def run_pipeline():
-    """Run the full pipeline once per app process after a successful load."""
+    """Extract, transform, and load all NCVS records."""
     tables, stats = transform(extract_data())
     load_dotenv()
     with closing(psycopg2.connect(
@@ -29,17 +29,12 @@ def run_pipeline():
 
 def main():
     st.title("NCVS Victimization Dashboard")
-    with st.spinner("Loading NCVS data..."):
-        try:
-            summary = run_pipeline()
-        except Exception as error:
-            st.error(f"Data load failed: {error}")
-            st.info("Reload the page to retry.")
-            return
-    st.success("Data loaded successfully.")
-    for line in summary:
-        st.text(line)
+    st.write("Data loaded successfully. The dashboard is under construction.")
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:] == ["--etl"]:
+        for line in run_pipeline():
+            print(line, flush=True)
+    else:
+        main()
