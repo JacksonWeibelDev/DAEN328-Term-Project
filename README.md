@@ -1,13 +1,19 @@
 # Team 4 Term Project DAEN 328 Fall 2026 
 
+This project extracts the Bureau of Justice Statistics National Crime
+Victimization Survey (NCVS) personal victimization data, cleans it, and loads
+it into PostgreSQL for a future Streamlit dashboard. The source is the public
+[NCVS API](https://api.ojp.gov/bjsdataset/v1/gcuy-rt5g.json).
+
 ## Docker setup
 
-Install Docker and the Docker Compose plugin. Copy `.env.sample` to `.env` and
-set a PostgreSQL password. If you have an existing `.env`, add the settings from
-the sample. Then start the application:
+Install Docker and Docker Compose. Copy `.env.sample` to `.env` and replace
+the sample password with a local password. Then start the application:
 
 ```sh
-docker compose up --build
+cp .env.sample .env
+# Edit .env and set POSTGRES_PASSWORD.
+docker-compose up --build
 ```
 
 Compose starts PostgreSQL, waits for it to be healthy, and then runs the `etl`
@@ -21,15 +27,31 @@ All services receive their configuration from `.env`. `PGHOST=db` and
 `PGPORT=5432` connect the ETL container to PostgreSQL inside the Compose
 network; `POSTGRES_PORT` controls the port exposed on the host. If ETL fails,
 the dashboard will not start. Inspect `docker compose logs etl` and rerun
-`docker compose up --build` after fixing the error.
+`docker-compose up --build` after fixing the error. Run tests with
+`docker-compose run --rm etl pytest`.
 
 The first load creates the three tables. Later loads upsert records using their
-primary keys; the entire database load is committed together. Each load fetches
-the full dataset. To inspect the table counts:
+primary keys; the entire database load is committed together. To inspect the
+table counts:
 
 ```sh
 docker compose exec db sh -c 'psql -h /var/run/postgresql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT (SELECT count(*) FROM respondents) AS respondents, (SELECT count(*) FROM offense_types) AS offense_types, (SELECT count(*) FROM victimizations) AS victimizations;"'
 ```
+
+## Incremental extraction
+
+The first run pulls the full API dataset. Later runs request only records with
+source `:updated_at` greater than the last successful run's maximum timestamp.
+The single-row `etl_checkpoint` table stores that timestamp in PostgreSQL's
+named volume. The checkpoint and all upserts commit together, so a failed run
+does not advance the position. Each run logs its extraction position, cleaning
+summary, and inserted and updated counts per table. Stopping with
+`docker-compose down` preserves the volume for the next run.
+
+The API must assign a later `:updated_at` when a record changes; a late-arriving
+record with the same or an earlier timestamp than the checkpoint cannot be
+detected by this timestamp-based pull. Full extraction completes before the
+checkpoint advances, including records that share the maximum timestamp.
 
 ## Database schema
 
@@ -91,6 +113,10 @@ erDiagram
         double wgtviccy
         smallint series
         double newwgt
+        timestamptz updated_at
+    }
+    ETL_CHECKPOINT {
+        boolean singleton PK
         timestamptz updated_at
     }
 ```
