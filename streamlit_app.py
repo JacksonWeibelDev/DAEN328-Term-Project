@@ -45,9 +45,6 @@ def run_pipeline():
     return lines
 
 
-
-# Official NCVS Select codebook:
-# https://bjs.ojp.gov/document/NCVS_Select_person_level_codebook.pdf
 RELATIONSHIP_LABELS = {
     1: "Intimates",
     2: "Other relatives",
@@ -70,8 +67,6 @@ GROUP_BY_FIELDS = {
 }
 UNKNOWN_GROUP = "Unknown / missing"
 
-# Approximate inland marker positions for the four U.S. census regions.
-# These are region labels on a map, NOT victim or incident coordinates.
 REGION_MAP_CENTERS = {
     "Northeast": (42.5, -75.0),
     "Midwest": (42.0, -92.5),
@@ -79,7 +74,6 @@ REGION_MAP_CENTERS = {
     "West": (39.5, -116.0),
 }
 
-# Codes come from the NCVS tables; "All" never removes unknown or missing codes.
 FILTER_LABELS = {
     "ager": AGE_LABELS,
     "region": REGION_LABELS,
@@ -302,8 +296,7 @@ def regional_map_summary(regional, age_choice):
     summary["lon"] = summary["region_name"].map(
         lambda region: REGION_MAP_CENTERS[region][1]
     )
-    # st.map sizes are radii in meters. Use a square-root relationship so the
-    # bubble area grows roughly with the unweighted number of observations.
+
     biggest = summary["sample_n"].max()
     summary["bubble_radius"] = (
         40000 + 140000 * (summary["sample_n"] / biggest) ** 0.5
@@ -338,7 +331,6 @@ def main():
         return
     df["year"] = df["year"].astype(int)
 
-    # Every sidebar selection updates all five charts.
     st.sidebar.header("Dashboard filters")
     st.sidebar.button("Reset all filters", on_click=reset_dashboard_filters,
                       use_container_width=True)
