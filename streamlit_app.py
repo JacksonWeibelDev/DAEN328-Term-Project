@@ -62,6 +62,22 @@ AGE_LABELS = {
 }
 REGION_LABELS = {1: "Northeast", 2: "Midwest", 3: "South", 4: "West"}
 SEX_LABELS = {1: "Male", 2: "Female"}
+GROUP_BY_OPTIONS = ["Default view", "Age group", "Region", "Sex"]
+GROUP_BY_FIELDS = {
+    "Age group": ("ager", AGE_LABELS),
+    "Region": ("region", REGION_LABELS),
+    "Sex": ("sex", SEX_LABELS),
+}
+UNKNOWN_GROUP = "Unknown / missing"
+
+# Approximate inland marker positions for the four U.S. census regions.
+# These are region labels on a map, NOT victim or incident coordinates.
+REGION_MAP_CENTERS = {
+    "Northeast": (42.5, -75.0),
+    "Midwest": (42.0, -92.5),
+    "South": (33.0, -94.0),
+    "West": (39.5, -116.0),
+}
 
 # Codes come from the NCVS tables; "All" never removes unknown or missing codes.
 FILTER_LABELS = {
@@ -202,14 +218,103 @@ def labeled_summary(frame, column, labels):
     return reporting_summary(eligible, "category")
 
 
+def subgroup_reporting_summary(frame, category_column, group_by, category_labels=None):
+    """Split each category's original reported-to-police rate into color segments.
+
+    Each segment is the subgroup's reported victimization weight divided by
+    the category's TOTAL eligible victimization weight (reported + unreported).
+    Thus the segments sum to the original category reporting percentage,
+    rather than to 100% or to the sum of subgroup-specific reporting rates.
+    Missing/unknown group codes remain included in the denominator and legend.
+    """
+    grouped = frame.copy()
+    if category_labels is not None:
+        grouped = grouped.loc[grouped[category_column].isin(category_labels)].copy()
+        grouped["category"] = grouped[category_column].map(category_labels)
+    else:
+        grouped["category"] = grouped[category_column]
+    group_column, group_labels = GROUP_BY_FIELDS[group_by]
+    grouped["group_label"] = grouped[group_column].map(group_labels).fillna(UNKNOWN_GROUP)
+    summary = reporting_summary(grouped, ["category", "group_label"])
+    if summary.empty:
+        summary["contribution_pct"] = pd.Series(dtype=float)
+        summary["category_reported_pct"] = pd.Series(dtype=float)
+    else:
+        category_total = summary.groupby("category")["weight_total"].transform("sum")
+        category_reported = summary.groupby("category")["weight_reported"].transform("sum")
+        summary["contribution_pct"] = 100 * summary["weight_reported"] / category_total
+        summary["category_reported_pct"] = 100 * category_reported / category_total
+    return summary
+
+
+def subgroup_reporting_chart(summary, group_by, category_order, height=300):
+    """Stack subgroup contributions without changing original reported-rate totals."""
+    group_order = list(GROUP_BY_FIELDS[group_by][1].values())
+    if UNKNOWN_GROUP in summary["group_label"].values:
+        group_order.append(UNKNOWN_GROUP)
+    chart_data = summary.copy()
+    chart_data["group_rank"] = chart_data["group_label"].map(
+        {label: index for index, label in enumerate(group_order)}
+    )
+    return (
+        alt.Chart(chart_data)
+        .mark_bar(stroke="#202020", strokeWidth=0.5)
+        .encode(
+            x=alt.X("contribution_pct:Q", stack="zero",
+                    title="Reported to police (%)",
+                    scale=alt.Scale(domain=[0, 100])),
+            y=alt.Y("category:N", title=None, sort=category_order),
+            color=alt.Color("group_label:N", title=group_by,
+                            scale=alt.Scale(domain=group_order, scheme="tableau10"),
+                            legend=alt.Legend(orient="bottom")),
+            order=alt.Order("group_rank:Q", sort="ascending"),
+            tooltip=[
+                alt.Tooltip("category:N", title="Category"),
+                alt.Tooltip("group_label:N", title=group_by),
+                alt.Tooltip("contribution_pct:Q", title="Contribution (percentage points)", format=".1f"),
+                alt.Tooltip("category_reported_pct:Q", title="Category reported (%)", format=".1f"),
+                alt.Tooltip("reported_pct:Q", title="Reported within group (%)", format=".1f"),
+                alt.Tooltip("sample_n:Q", title="Sample records", format=",d"),
+            ],
+        )
+        .properties(height=height)
+    )
+
+
+def reporting_rate_color(rate):
+    """A light-to-dark blue scale for a map bubble's weighted reporting rate."""
+    fraction = max(0.0, min(1.0, float(rate) / 100.0))
+    light, dark = (191, 219, 254), (10, 62, 116)
+    channels = [round(a + (b - a) * fraction) for a, b in zip(light, dark)]
+    return "#" + "".join(f"{channel:02x}" for channel in channels)
+
+
+def regional_map_summary(regional, age_choice):
+    """Return one representative bubble per region for the selected age group."""
+    selected = (regional if age_choice == "All age groups" else
+                regional.loc[regional["age_group"] == age_choice])
+    summary = reporting_summary(selected, "region_name")
+    if summary.empty:
+        return summary
+    summary["lat"] = summary["region_name"].map(
+        lambda region: REGION_MAP_CENTERS[region][0]
+    )
+    summary["lon"] = summary["region_name"].map(
+        lambda region: REGION_MAP_CENTERS[region][1]
+    )
+    # st.map sizes are radii in meters. Use a square-root relationship so the
+    # bubble area grows roughly with the unweighted number of observations.
+    biggest = summary["sample_n"].max()
+    summary["bubble_radius"] = (
+        40000 + 140000 * (summary["sample_n"] / biggest) ** 0.5
+    )
+    summary["bubble_color"] = summary["reported_pct"].map(reporting_rate_color)
+    return summary
+
+
 def main():
     st.set_page_config(page_title="NCVS | Police Reporting", layout="wide")
     st.title("NCVS | Police Reporting Dashboard")
-    st.write(
-        "**Why are some victimizations reported to the police while others are not?** "
-        "Explore five questions about crime types, trends, relationships, "
-        "weapons and injuries, and demographics. Scroll down to see all five analyses."
-    )
 
     try:
         df = get_dashboard_data()
@@ -305,182 +410,297 @@ def main():
     overview2.metric("Not reported", f"{100 - pct:.1f}%")
     overview3.metric("Sample victimizations", f"{len(valid):,}")
     overview4.metric("Years in selection", f"{valid['year'].nunique():,}")
-    st.caption(
-        "Weighted percentages use `wgtviccy`, the annual victimization weight. "
-        "Only `notify = 1` (reported) and `notify = 2` (not reported) and positive "
-        "weights are included; sample counts are unweighted."
-    )
 
-    # ------------------------------------------------------------------
-    # Question 1: Victimization type
-    # ------------------------------------------------------------------
-    st.divider()
-    st.header("1. Which types of victimizations are most and least likely to be reported?")
-    st.write("Compare the share of each crime type that was reported to police.")
-    crime = reporting_summary(valid, "offense_name")
-    if not crime.empty:
-        crime = crime.sort_values("reported_pct", ascending=False)
-        st.altair_chart(
-            horizontal_reporting_chart(crime, "offense_name", height=250),
-            use_container_width=True,
+    question_tabs = st.tabs([
+        "1. Crime types",
+        "2. Trends over time",
+        "3. Relationships",
+        "4. Weapons & injuries",
+        "5. Age & region",
+    ])
+
+    with question_tabs[0]:
+        # ------------------------------------------------------------------
+        # Question 1: Victimization type
+        # ------------------------------------------------------------------
+        st.header("1. Which types of victimizations are most and least likely to be reported?")
+        st.write("Compare the share of each crime type that was reported to police.")
+        crime_group_by = st.selectbox(
+            "Group by", GROUP_BY_OPTIONS, index=0, key="crime_group_by"
         )
-        with st.expander("View crime-type reporting table"):
-            st.dataframe(
-                crime[["offense_name", "reported_pct", "sample_n"]].rename(
+        crime = reporting_summary(valid, "offense_name")
+        if not crime.empty:
+            crime = crime.sort_values("reported_pct", ascending=False)
+            if crime_group_by == "Default view":
+                crime_chart = horizontal_reporting_chart(crime, "offense_name", height=250)
+                crime_table = crime[["offense_name", "reported_pct", "sample_n"]].rename(
                     columns={"offense_name": "Victimization type",
                              "reported_pct": "Reported (%)", "sample_n": "Sample records"}
-                ).round({"Reported (%)": 1}),
-                hide_index=True, use_container_width=True,
-            )
+                )
+            else:
+                crime_groups = subgroup_reporting_summary(
+                    valid, "offense_name", crime_group_by
+                )
+                crime_chart = subgroup_reporting_chart(
+                    crime_groups, crime_group_by, crime["offense_name"].tolist(),
+                    height=max(240, min(500, len(crime) * 42)),
+                )
+                crime_table = crime_groups[
+                    ["category", "group_label", "contribution_pct", "category_reported_pct", "reported_pct", "sample_n"]
+                ].rename(columns={
+                    "category": "Victimization type", "group_label": crime_group_by,
+                    "contribution_pct": "Contribution (percentage points)",
+                    "category_reported_pct": "Total reported (%)",
+                    "reported_pct": "Reported within group (%)", "sample_n": "Sample records",
+                })
+            if crime_group_by != "Default view":
+                st.caption(
+                    "Colors split the original reported-to-police bar into each group's "
+                    "contribution. The total bar length is unchanged from Default view "
+                    "(not normalized to 100%). Hover to see each group's own reporting rate."
+                )
+            st.altair_chart(crime_chart, use_container_width=True)
+            with st.expander("View crime-type reporting table"):
+                st.dataframe(
+                    crime_table.round({"Reported (%)": 1, "Reported within group (%)": 1,
+                                       "Total reported (%)": 1, "Contribution (percentage points)": 1}),
+                    hide_index=True, use_container_width=True,
+                )
 
-    # ------------------------------------------------------------------
-    # Question 2: Change over time
-    # ------------------------------------------------------------------
-    st.divider()
-    st.header("2. How have police reporting patterns changed over time?")
-    st.write("Track the weighted percentage reported to police by survey year.")
-    compare = st.checkbox("Compare individual victimization types", value=False)
-    if compare:
-        yearly = reporting_summary(valid, ["year", "offense_name"])
-        line_chart = (
-            alt.Chart(yearly)
-            .mark_line(point=True)
-            .encode(
-                x=alt.X("year:Q", title="Survey year", axis=alt.Axis(format="d")),
-                y=alt.Y("reported_pct:Q", title="Reported to police (%)",
-                        scale=alt.Scale(domain=[0, 100])),
-                color=alt.Color("offense_name:N", title="Victimization type"),
-                tooltip=["year:Q", "offense_name:N",
-                         alt.Tooltip("reported_pct:Q", format=".1f", title="Reported (%)"),
-                         alt.Tooltip("sample_n:Q", format=",d", title="Sample records")],
+    with question_tabs[1]:
+        # ------------------------------------------------------------------
+        # Question 2: Change over time
+        # ------------------------------------------------------------------
+        st.header("2. How have police reporting patterns changed over time?")
+        st.write("Track the weighted percentage reported to police by survey year.")
+        compare = st.checkbox("Compare individual victimization types", value=False)
+        if compare:
+            yearly = reporting_summary(valid, ["year", "offense_name"])
+            line_chart = (
+                alt.Chart(yearly)
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("year:Q", title="Survey year", axis=alt.Axis(format="d")),
+                    y=alt.Y("reported_pct:Q", title="Reported to police (%)",
+                            scale=alt.Scale(domain=[0, 100])),
+                    color=alt.Color("offense_name:N", title="Victimization type"),
+                    tooltip=["year:Q", "offense_name:N",
+                             alt.Tooltip("reported_pct:Q", format=".1f", title="Reported (%)"),
+                             alt.Tooltip("sample_n:Q", format=",d", title="Sample records")],
+                )
+                .properties(height=360)
             )
-            .properties(height=360)
-        )
-    else:
-        yearly = reporting_summary(valid, "year").sort_values("year")
-        line_chart = (
-            alt.Chart(yearly)
-            .mark_line(point=True, color="#167c99")
-            .encode(
-                x=alt.X("year:Q", title="Survey year", axis=alt.Axis(format="d")),
-                y=alt.Y("reported_pct:Q", title="Reported to police (%)",
-                        scale=alt.Scale(domain=[0, 100])),
-                tooltip=["year:Q",
-                         alt.Tooltip("reported_pct:Q", format=".1f", title="Reported (%)"),
-                         alt.Tooltip("sample_n:Q", format=",d", title="Sample records")],
-            )
-            .properties(height=360)
-        )
-    if not yearly.empty:
-        st.altair_chart(line_chart, use_container_width=True)
-    else:
-        st.info("No yearly observations are available with the current filters.")
-
-    # ------------------------------------------------------------------
-    # Question 3: Victim-offender relationship
-    # ------------------------------------------------------------------
-    st.divider()
-    st.header("3. How does the victim-offender relationship relate to police reporting?")
-    st.write("Compare reported percentages for known victim-offender relationships.")
-    relationships = labeled_summary(valid, "direl", RELATIONSHIP_LABELS)
-    if relationships.empty:
-        st.info("No incidents with a known relationship category match your current filters.")
-    else:
-        st.altair_chart(
-            horizontal_reporting_chart(
-                relationships, "category",
-                order=list(RELATIONSHIP_LABELS.values()), height=230
-            ),
-            use_container_width=True,
-        )
-        with st.expander("View relationship comparison table"):
-            st.dataframe(
-                relationships[["category", "reported_pct", "sample_n"]]
-                .rename(columns={"category": "Victim-offender relationship",
-                                 "reported_pct": "Reported (%)", "sample_n": "Sample records"})
-                .round({"Reported (%)": 1}),
-                hide_index=True, use_container_width=True,
-            )
-
-    # ------------------------------------------------------------------
-    # Question 4: Weapon presence and injury
-    # ------------------------------------------------------------------
-    st.divider()
-    st.header("4. Are victimizations involving weapons or injuries more frequently reported?")
-    st.write("Compare the reporting rate when a weapon was present, and when the victim was injured.")
-    weapon_result = labeled_summary(valid, "weapon", WEAPON_LABELS)
-    injury_result = labeled_summary(valid, "injury", INJURY_LABELS)
-    weapon_col, injury_col = st.columns(2)
-    with weapon_col:
-        st.subheader("Weapon presence")
-        if weapon_result.empty:
-            st.info("No valid weapon-present/absent answers match these filters.")
         else:
-            st.altair_chart(
-                horizontal_reporting_chart(weapon_result, "category",
-                                           order=list(WEAPON_LABELS.values()), height=190),
-                use_container_width=True,
+            yearly = reporting_summary(valid, "year").sort_values("year")
+            line_chart = (
+                alt.Chart(yearly)
+                .mark_line(point=True, color="#167c99")
+                .encode(
+                    x=alt.X("year:Q", title="Survey year", axis=alt.Axis(format="d")),
+                    y=alt.Y("reported_pct:Q", title="Reported to police (%)",
+                            scale=alt.Scale(domain=[0, 100])),
+                    tooltip=["year:Q",
+                             alt.Tooltip("reported_pct:Q", format=".1f", title="Reported (%)"),
+                             alt.Tooltip("sample_n:Q", format=",d", title="Sample records")],
+                )
+                .properties(height=360)
             )
-    with injury_col:
-        st.subheader("Injury")
-        if injury_result.empty:
-            st.info("No valid injured/not-injured answers match these filters.")
+        if not yearly.empty:
+            st.altair_chart(line_chart, use_container_width=True)
         else:
-            st.altair_chart(
-                horizontal_reporting_chart(injury_result, "category",
-                                           order=list(INJURY_LABELS.values()), height=190),
-                use_container_width=True,
-            )
+            st.info("No yearly observations are available with the current filters.")
 
-    # ------------------------------------------------------------------
-    # Question 5: Age and region
-    # ------------------------------------------------------------------
-    st.divider()
-    st.header("5. How do reporting patterns differ by age group and region?")
-    st.write(
-        "Each square is the weighted percentage of victimizations reported to "
-        "police for an age group within a census region. Darker blue indicates a higher percentage."
-    )
-    regional = valid.loc[
-        valid["ager"].isin(AGE_LABELS) & valid["region"].isin(REGION_LABELS)
-    ].copy()
-    if regional.empty:
-        st.info("No records with valid age and region codes match your filters.")
-    else:
-        regional["age_group"] = regional["ager"].map(AGE_LABELS)
-        regional["region_name"] = regional["region"].map(REGION_LABELS)
-        matrix = reporting_summary(regional, ["age_group", "region_name"])
-        matrix["rate_label"] = matrix["reported_pct"].map(lambda rate: f"{rate:.1f}%")
-        heatmap_base = alt.Chart(matrix).encode(
-            x=alt.X("region_name:N", title="U.S. census region",
-                    sort=list(REGION_LABELS.values())),
-            y=alt.Y("age_group:N", title="Victim age",
-                    sort=list(AGE_LABELS.values())),
-            tooltip=[
-                alt.Tooltip("age_group:N", title="Age group"),
-                alt.Tooltip("region_name:N", title="Region"),
-                alt.Tooltip("reported_pct:Q", format=".1f", title="Reported (%)"),
-                alt.Tooltip("sample_n:Q", format=",d", title="Sample records"),
-            ],
+    with question_tabs[2]:
+        # ------------------------------------------------------------------
+        # Question 3: Victim-offender relationship
+        # ------------------------------------------------------------------
+        st.header("3. How does the victim-offender relationship relate to police reporting?")
+        st.write("Compare reported percentages for known victim-offender relationships.")
+        relationship_group_by = st.selectbox(
+            "Group by", GROUP_BY_OPTIONS, index=0, key="relationship_group_by"
         )
-        cells = heatmap_base.mark_rect().encode(
-            color=alt.Color("reported_pct:Q", title="Reported (%)",
-                            scale=alt.Scale(domain=[0, 100], scheme="blues")),
+        relationships = labeled_summary(valid, "direl", RELATIONSHIP_LABELS)
+        if relationships.empty:
+            st.info("No incidents with a known relationship category match your current filters.")
+        else:
+            if relationship_group_by == "Default view":
+                relationship_chart = horizontal_reporting_chart(
+                    relationships, "category",
+                    order=list(RELATIONSHIP_LABELS.values()), height=230,
+                )
+                relationship_table = relationships[
+                    ["category", "reported_pct", "sample_n"]
+                ].rename(columns={
+                    "category": "Victim-offender relationship",
+                    "reported_pct": "Reported (%)", "sample_n": "Sample records",
+                })
+            else:
+                relationship_groups = subgroup_reporting_summary(
+                    valid, "direl", relationship_group_by, RELATIONSHIP_LABELS
+                )
+                relationship_chart = subgroup_reporting_chart(
+                    relationship_groups, relationship_group_by,
+                    list(RELATIONSHIP_LABELS.values()), height=225,
+                )
+                relationship_table = relationship_groups[
+                    ["category", "group_label", "contribution_pct", "category_reported_pct", "reported_pct", "sample_n"]
+                ].rename(columns={
+                    "category": "Victim-offender relationship",
+                    "group_label": relationship_group_by,
+                    "contribution_pct": "Contribution (percentage points)",
+                    "category_reported_pct": "Total reported (%)",
+                    "reported_pct": "Reported within group (%)", "sample_n": "Sample records",
+                })
+            if relationship_group_by != "Default view":
+                st.caption(
+                    "Colors split each original reported-to-police bar into group contributions. "
+                    "The overall percentage stays the same as Default view; hover for "
+                    "the reporting rate within a group."
+                )
+            st.altair_chart(relationship_chart, use_container_width=True)
+            with st.expander("View relationship comparison table"):
+                st.dataframe(
+                    relationship_table.round({"Reported (%)": 1, "Reported within group (%)": 1,
+                                              "Total reported (%)": 1, "Contribution (percentage points)": 1}),
+                    hide_index=True, use_container_width=True,
+                )
+
+    with question_tabs[3]:
+        # ------------------------------------------------------------------
+        # Question 4: Weapon presence and injury
+        # ------------------------------------------------------------------
+        st.header("4. Are victimizations involving weapons or injuries more frequently reported?")
+        st.write("Compare the reporting rate when a weapon was present, and when the victim was injured.")
+        circumstance_group_by = st.selectbox(
+            "Group by", GROUP_BY_OPTIONS, index=0, key="circumstance_group_by"
         )
-        labels = heatmap_base.mark_text(fontSize=12, fontWeight="bold").encode(
-            text="rate_label:N",
-            color=alt.condition("datum.reported_pct >= 65", alt.value("white"),
-                                alt.value("#17365d")),
-        )
-        st.altair_chart((cells + labels).properties(height=315), use_container_width=True)
-        with st.expander("View the age-by-region data"):
-            st.dataframe(
-                matrix[["age_group", "region_name", "reported_pct", "sample_n"]]
-                .rename(columns={"age_group": "Age group", "region_name": "Region",
-                                 "reported_pct": "Reported (%)", "sample_n": "Sample records"})
-                .round({"Reported (%)": 1}),
-                hide_index=True, use_container_width=True,
+        if circumstance_group_by != "Default view":
+            st.caption(
+                "Colors divide the original reported-to-police percentages into group "
+                "contributions without changing the total length of either bar. "
+                "Hover to see each group's reporting rate."
             )
+        weapon_result = labeled_summary(valid, "weapon", WEAPON_LABELS)
+        injury_result = labeled_summary(valid, "injury", INJURY_LABELS)
+        weapon_col, injury_col = st.columns(2)
+        with weapon_col:
+            st.subheader("Weapon presence")
+            if weapon_result.empty:
+                st.info("No valid weapon-present/absent answers match these filters.")
+            else:
+                if circumstance_group_by == "Default view":
+                    weapon_chart = horizontal_reporting_chart(
+                        weapon_result, "category",
+                        order=list(WEAPON_LABELS.values()), height=190,
+                    )
+                else:
+                    weapon_groups = subgroup_reporting_summary(
+                        valid, "weapon", circumstance_group_by, WEAPON_LABELS
+                    )
+                    weapon_chart = subgroup_reporting_chart(
+                        weapon_groups, circumstance_group_by,
+                        list(WEAPON_LABELS.values()), height=180,
+                    )
+                st.altair_chart(weapon_chart, use_container_width=True)
+        with injury_col:
+            st.subheader("Injury")
+            if injury_result.empty:
+                st.info("No valid injured/not-injured answers match these filters.")
+            else:
+                if circumstance_group_by == "Default view":
+                    injury_chart = horizontal_reporting_chart(
+                        injury_result, "category",
+                        order=list(INJURY_LABELS.values()), height=190,
+                    )
+                else:
+                    injury_groups = subgroup_reporting_summary(
+                        valid, "injury", circumstance_group_by, INJURY_LABELS
+                    )
+                    injury_chart = subgroup_reporting_chart(
+                        injury_groups, circumstance_group_by,
+                        list(INJURY_LABELS.values()), height=180,
+                    )
+                st.altair_chart(injury_chart, use_container_width=True)
+
+    with question_tabs[4]:
+        # ------------------------------------------------------------------
+        # Question 5: Age and region
+        # ------------------------------------------------------------------
+        st.header("5. How do reporting patterns differ by age group and region?")
+        st.write(
+            "Each square is the weighted percentage of victimizations reported to "
+            "police for an age group within a census region. Darker blue indicates a higher percentage."
+        )
+        regional = valid.loc[
+            valid["ager"].isin(AGE_LABELS) & valid["region"].isin(REGION_LABELS)
+        ].copy()
+        if regional.empty:
+            st.info("No records with valid age and region codes match your filters.")
+        else:
+            regional["age_group"] = regional["ager"].map(AGE_LABELS)
+            regional["region_name"] = regional["region"].map(REGION_LABELS)
+            matrix = reporting_summary(regional, ["age_group", "region_name"])
+            matrix["rate_label"] = matrix["reported_pct"].map(lambda rate: f"{rate:.1f}%")
+            heatmap_base = alt.Chart(matrix).encode(
+                x=alt.X("region_name:N", title="U.S. census region",
+                        sort=list(REGION_LABELS.values())),
+                y=alt.Y("age_group:N", title="Victim age",
+                        sort=list(AGE_LABELS.values())),
+                tooltip=[
+                    alt.Tooltip("age_group:N", title="Age group"),
+                    alt.Tooltip("region_name:N", title="Region"),
+                    alt.Tooltip("reported_pct:Q", format=".1f", title="Reported (%)"),
+                    alt.Tooltip("sample_n:Q", format=",d", title="Sample records"),
+                ],
+            )
+            cells = heatmap_base.mark_rect().encode(
+                color=alt.Color("reported_pct:Q", title="Reported (%)",
+                                scale=alt.Scale(domain=[0, 100], scheme="blues")),
+            )
+            labels = heatmap_base.mark_text(fontSize=12, fontWeight="bold").encode(
+                text="rate_label:N",
+                color=alt.condition("datum.reported_pct >= 65", alt.value("white"),
+                                    alt.value("#17365d")),
+            )
+            st.altair_chart((cells + labels).properties(height=315), use_container_width=True)
+
+            st.subheader("Victimization counts by U.S. region")
+            map_age_choice = st.selectbox(
+                "Show age group on map", ["All age groups", *AGE_LABELS.values()],
+                index=0, key="regional_map_age",
+            )
+            map_summary = regional_map_summary(regional, map_age_choice)
+            if map_summary.empty:
+                st.info("No regional observations are available for the selected age group.")
+            else:
+                st.caption(
+                    "Each marker represents a census region, not an incident location. "
+                    "Larger circles indicate more unweighted victimization records "
+                    "for the selected age group; darker blue indicates a higher "
+                    "survey-weighted percentage reported to police."
+                )
+                st.map(
+                    map_summary, latitude="lat", longitude="lon",
+                    size="bubble_radius", color="bubble_color", zoom=3,
+                )
+                map_table = map_summary[
+                    ["region_name", "sample_n", "reported_pct"]
+                ].rename(columns={
+                    "region_name": "Region", "sample_n": "Victimization records",
+                    "reported_pct": "Reported (%)",
+                })
+                st.dataframe(
+                    map_table.round({"Reported (%)": 1}),
+                    hide_index=True, use_container_width=True,
+                )
+            with st.expander("View the age-by-region data"):
+                st.dataframe(
+                    matrix[["age_group", "region_name", "reported_pct", "sample_n"]]
+                    .rename(columns={"age_group": "Age group", "region_name": "Region",
+                                     "reported_pct": "Reported (%)", "sample_n": "Sample records"})
+                    .round({"Reported (%)": 1}),
+                    hide_index=True, use_container_width=True,
+                )
 
     st.divider()
     with st.expander("Methodology, data definitions, and data preview"):
